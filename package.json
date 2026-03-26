@@ -1,0 +1,10 @@
+{
+  "name": "formboost-sender",
+  "version": "1.0.0",
+  "main": "server.js",
+  "dependencies": {
+    "express": "^4.18.2",
+    "playwright": "^1.50.0",
+    "@google-cloud/storage": "^7.0.0"
+  }
+}
