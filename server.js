@@ -14,6 +14,21 @@ const FIELD_PATTERNS = {
   message: ['message', 'body', 'content', 'inquiry', 'comment', 'detail', 'text', 'toiawase', 'naiyou', 'メッセージ', 'お問い合わせ内容', '内容', '詳細', 'biko', 'description', 'question'],
 }
 
+// 送信完了ページの検出キーワード
+const COMPLETE_KEYWORDS = [
+  '受け付けました', 'ありがとうございました', '送信しました', '完了しました',
+  'お問い合わせを受け付け', '送信が完了', 'お問い合わせありがとう',
+  'thank you', 'thank_you', 'thanks', 'success', 'complete', 'completed',
+  'confirmation', 'confirmed', 'submitted', 'received',
+  'ご連絡ありがとう', 'メールをお送り', '担当者よりご連絡'
+]
+
+// URLに含まれる完了ページのパターン
+const COMPLETE_URL_PATTERNS = [
+  'thank', 'thanks', 'complete', 'success', 'confirm', 'done',
+  'finish', 'sent', 'received', '/ok', 'complete', 'kanryo', '完了'
+]
+
 function matchField(name, id, placeholder, type, tag) {
   const combined = `${name||''} ${id||''} ${placeholder||''}`.toLowerCase()
   if (type === 'email') return 'email'
@@ -25,18 +40,33 @@ function matchField(name, id, placeholder, type, tag) {
   return null
 }
 
+// 完了ページかどうかを判定
+async function isCompletePage(page) {
+  try {
+    const url = page.url().toLowerCase()
+    const urlMatch = COMPLETE_URL_PATTERNS.some(p => url.includes(p))
+    if (urlMatch) return { detected: true, reason: 'url', text: url }
+
+    const bodyText = await page.evaluate(() => document.body.innerText || '')
+    const textMatch = COMPLETE_KEYWORDS.find(kw => bodyText.includes(kw))
+    if (textMatch) return { detected: true, reason: 'text', text: textMatch }
+
+    return { detected: false }
+  } catch {
+    return { detected: false }
+  }
+}
+
 async function handleChoiceFields(frame) {
   const handled = []
 
   // ===== ラジオボタン =====
-  // 同じname属性でグループ化して「その他」を優先選択
   const radioGroups = await frame.evaluate(() => {
     const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
     const groups = {}
     radios.forEach(r => {
-      const key = r.name || r.closest('fieldset')?.id || 'group_' + Math.random()
+      const key = r.name || r.closest('fieldset')?.id || 'group_' + r.id
       if (!groups[key]) groups[key] = []
-      // ラベルテキスト取得（<a>タグ含む場合もinnerTextで取得）
       const labelEl = document.querySelector(`label[for="${r.id}"]`) || r.closest('label')
       const label = labelEl?.innerText?.trim() || r.value || ''
       groups[key].push({ id: r.id, name: r.name, value: r.value, label, checked: r.checked })
@@ -63,18 +93,11 @@ async function handleChoiceFields(frame) {
   }
 
   // ===== チェックボックス：未チェックのものをすべてチェック =====
-  // （お問い合わせフォームのチェックボックスは同意 or 選択肢のどちらかなので全チェックが安全）
   const checkboxes = await frame.evaluate(() => {
     return Array.from(document.querySelectorAll('input[type="checkbox"]')).map(el => {
       const labelEl = document.querySelector(`label[for="${el.id}"]`) || el.closest('label')
       const label = labelEl?.innerText?.trim() || el.value || ''
-      return {
-        id: el.id,
-        name: el.name,
-        value: el.value,
-        label,
-        checked: el.checked
-      }
+      return { id: el.id, name: el.name, value: el.value, label, checked: el.checked }
     })
   })
 
@@ -83,9 +106,7 @@ async function handleChoiceFields(frame) {
     try {
       const selector = cb.id
         ? `#${cb.id}`
-        : cb.name
-          ? `input[type="checkbox"][name="${cb.name}"]`
-          : null
+        : cb.name ? `input[type="checkbox"][name="${cb.name}"]` : null
       if (selector) {
         await frame.click(selector, { timeout: 3000 })
         handled.push({ type: 'checkbox', label: cb.label || cb.value })
@@ -105,17 +126,13 @@ async function handleChoiceFields(frame) {
 
   const OTHER_SELECT_KEYWORDS = ['その他', 'other', 'お問い合わせ', 'general', 'その他のお問い合わせ']
   for (const sel of selects) {
-    // 最初の空選択肢や未選択状態の場合のみ操作
     const firstOption = sel.options[0]
-    const isUnselected = !sel.currentValue || sel.currentValue === firstOption?.value && !firstOption?.value
+    const isUnselected = !sel.currentValue || (sel.currentValue === firstOption?.value && !firstOption?.value)
     if (!isUnselected) continue
-
-    // 値のある選択肢の中から「その他」優先、なければ最後
     const validOptions = sel.options.filter(o => o.value)
     const preferred = validOptions.find(o =>
       OTHER_SELECT_KEYWORDS.some(kw => (o.text + o.value).toLowerCase().includes(kw))
     ) || validOptions[validOptions.length - 1]
-
     if (preferred?.value) {
       try {
         const selector = sel.id ? `#${sel.id}` : `select[name="${sel.name}"]`
@@ -150,7 +167,6 @@ async function getTextFields(frame) {
 app.post('/submit', async (req, res) => {
   const { form_url, sender } = req.body
   const { company, name, email, phone, message } = sender || {}
-
   if (!form_url) return res.status(400).json({ success: false, error: 'form_url is required' })
 
   let browser
@@ -170,7 +186,6 @@ app.post('/submit', async (req, res) => {
     const choiceHandled = []
 
     for (const frame of frames) {
-      // テキスト系フィールドを入力
       const fields = await getTextFields(frame)
       for (const field of fields) {
         const fieldType = matchField(field.name, field.id, field.placeholder,
@@ -197,45 +212,58 @@ app.post('/submit', async (req, res) => {
           }
         }
       }
-
-      // ラジオ・チェックボックス・セレクトを処理
       const choices = await handleChoiceFields(frame)
       choiceHandled.push(...choices)
     }
 
-    // 送信ボタンを探してクリック
-    let submitted = false
+    // 送信ボタンをクリック
+    let clickedSubmit = false
     const submitSelectors = [
-      'button[type=submit]',
-      'input[type=submit]',
-      'button:has-text("送信する")',
-      'button:has-text("送信")',
-      'button:has-text("確認")',
-      'button:has-text("次へ")',
-      'button:has-text("Submit")',
-      'button:has-text("Send")',
+      'button[type=submit]', 'input[type=submit]',
+      'button:has-text("送信する")', 'button:has-text("送信")',
+      'button:has-text("確認")', 'button:has-text("次へ")',
+      'button:has-text("Submit")', 'button:has-text("Send")',
       '[class*="submit"]',
     ]
-
     for (const sel of submitSelectors) {
       try {
         const btn = await page.$(sel)
         if (btn) {
           await btn.click()
           await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {})
-          submitted = true
+          clickedSubmit = true
           break
         }
       } catch { continue }
     }
 
+    // 完了ページ判定
+    const completeCheck = await isCompletePage(page)
+    const success = clickedSubmit && completeCheck.detected
+
+    // 完了ページのスクリーンショット
     const finalShot = await page.screenshot({ fullPage: false })
+    const screenshotBase64 = `data:image/png;base64,${finalShot.toString('base64')}`
+
+    // 送付内容サマリー
+    const sentContent = {
+      company: company || '',
+      name: name || '',
+      email: email || '',
+      phone: phone || '',
+      message: (message || '').slice(0, 100) + ((message || '').length > 100 ? '...' : '')
+    }
 
     res.json({
-      success: submitted,
+      success,
+      clicked_submit: clickedSubmit,
+      complete_detected: completeCheck.detected,
+      complete_reason: completeCheck.reason,
+      complete_keyword: completeCheck.text,
       filled_fields: filled,
       choice_fields: choiceHandled,
-      screenshot_url: `data:image/png;base64,${finalShot.toString('base64')}`,
+      screenshot_url: screenshotBase64,
+      sent_content: sentContent,
       page_title: await page.title(),
       final_url: page.url(),
       fields_found: filled.length + choiceHandled.length
