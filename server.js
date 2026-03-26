@@ -25,31 +25,28 @@ function matchField(name, id, placeholder, type, tag) {
   return null
 }
 
-// ラジオ・チェックボックス・セレクトを処理する関数
 async function handleChoiceFields(frame) {
   const handled = []
 
   // ===== ラジオボタン =====
-  // 同じname属性でグループ化して、グループごとに1つ選択
+  // 同じname属性でグループ化して「その他」を優先選択
   const radioGroups = await frame.evaluate(() => {
     const radios = Array.from(document.querySelectorAll('input[type="radio"]'))
     const groups = {}
     radios.forEach(r => {
-      const key = r.name || r.closest('fieldset')?.id || 'unknown'
+      const key = r.name || r.closest('fieldset')?.id || 'group_' + Math.random()
       if (!groups[key]) groups[key] = []
-      const label = document.querySelector(`label[for="${r.id}"]`)?.textContent?.trim()
-        || r.closest('label')?.textContent?.trim()
-        || r.value || ''
+      // ラベルテキスト取得（<a>タグ含む場合もinnerTextで取得）
+      const labelEl = document.querySelector(`label[for="${r.id}"]`) || r.closest('label')
+      const label = labelEl?.innerText?.trim() || r.value || ''
       groups[key].push({ id: r.id, name: r.name, value: r.value, label, checked: r.checked })
     })
     return groups
   })
 
-  for (const [groupName, options] of Object.entries(radioGroups)) {
-    if (options.some(o => o.checked)) continue // すでに選択済み
-
-    // 「その他」「お問い合わせ」を優先、なければ最後の選択肢
-    const OTHER_KEYWORDS = ['その他', 'other', 'お問い合わせ', 'その他のお問い合わせ', 'general']
+  for (const [, options] of Object.entries(radioGroups)) {
+    if (options.some(o => o.checked)) continue
+    const OTHER_KEYWORDS = ['その他', 'other', 'お問い合わせ', 'general', 'その他のお問い合わせ', '資料請求']
     const preferred = options.find(o =>
       OTHER_KEYWORDS.some(kw => (o.label + o.value).toLowerCase().includes(kw))
     ) || options[options.length - 1]
@@ -60,31 +57,40 @@ async function handleChoiceFields(frame) {
           ? `#${preferred.id}`
           : `input[type="radio"][name="${preferred.name}"][value="${preferred.value}"]`
         await frame.click(selector, { timeout: 3000 })
-        handled.push({ type: 'radio', group: groupName, selected: preferred.label || preferred.value })
-      } catch (e) { /* skip */ }
+        handled.push({ type: 'radio', selected: preferred.label || preferred.value })
+      } catch { /* skip */ }
     }
   }
 
-  // ===== チェックボックス（利用規約・プライバシーポリシー系） =====
+  // ===== チェックボックス：未チェックのものをすべてチェック =====
+  // （お問い合わせフォームのチェックボックスは同意 or 選択肢のどちらかなので全チェックが安全）
   const checkboxes = await frame.evaluate(() => {
     return Array.from(document.querySelectorAll('input[type="checkbox"]')).map(el => {
-      const label = document.querySelector(`label[for="${el.id}"]`)?.textContent?.trim()
-        || el.closest('label')?.textContent?.trim()
-        || el.value || ''
-      return { id: el.id, name: el.name, value: el.value, label, checked: el.checked }
+      const labelEl = document.querySelector(`label[for="${el.id}"]`) || el.closest('label')
+      const label = labelEl?.innerText?.trim() || el.value || ''
+      return {
+        id: el.id,
+        name: el.name,
+        value: el.value,
+        label,
+        checked: el.checked
+      }
     })
   })
 
-  // 利用規約・プライバシーポリシーは同意チェック
-  const AGREE_KEYWORDS = ['利用規約', 'プライバシー', '同意', 'agree', 'privacy', 'terms', '規約']
   for (const cb of checkboxes) {
-    if (!cb.checked && AGREE_KEYWORDS.some(kw => (cb.label + cb.value).toLowerCase().includes(kw))) {
-      try {
-        const selector = cb.id ? `#${cb.id}` : `input[type="checkbox"][name="${cb.name}"]`
+    if (cb.checked) continue
+    try {
+      const selector = cb.id
+        ? `#${cb.id}`
+        : cb.name
+          ? `input[type="checkbox"][name="${cb.name}"]`
+          : null
+      if (selector) {
         await frame.click(selector, { timeout: 3000 })
-        handled.push({ type: 'checkbox_agree', label: cb.label })
-      } catch (e) { /* skip */ }
-    }
+        handled.push({ type: 'checkbox', label: cb.label || cb.value })
+      }
+    } catch { /* skip */ }
   }
 
   // ===== セレクトボックス =====
@@ -93,24 +99,29 @@ async function handleChoiceFields(frame) {
       id: el.id,
       name: el.name,
       currentValue: el.value,
-      options: Array.from(el.options).map(o => ({ value: o.value, text: o.text }))
+      options: Array.from(el.options).map(o => ({ value: o.value, text: o.text.trim() }))
     }))
   })
 
   const OTHER_SELECT_KEYWORDS = ['その他', 'other', 'お問い合わせ', 'general', 'その他のお問い合わせ']
   for (const sel of selects) {
-    if (sel.currentValue && sel.currentValue !== '' && sel.currentValue !== sel.options[0]?.value) continue
+    // 最初の空選択肢や未選択状態の場合のみ操作
+    const firstOption = sel.options[0]
+    const isUnselected = !sel.currentValue || sel.currentValue === firstOption?.value && !firstOption?.value
+    if (!isUnselected) continue
 
-    const preferred = sel.options.find(o =>
+    // 値のある選択肢の中から「その他」優先、なければ最後
+    const validOptions = sel.options.filter(o => o.value)
+    const preferred = validOptions.find(o =>
       OTHER_SELECT_KEYWORDS.some(kw => (o.text + o.value).toLowerCase().includes(kw))
-    ) || sel.options[sel.options.length - 1]
+    ) || validOptions[validOptions.length - 1]
 
-    if (preferred && preferred.value) {
+    if (preferred?.value) {
       try {
         const selector = sel.id ? `#${sel.id}` : `select[name="${sel.name}"]`
         await frame.selectOption(selector, preferred.value, { timeout: 3000 })
         handled.push({ type: 'select', name: sel.name, selected: preferred.text })
-      } catch (e) { /* skip */ }
+      } catch { /* skip */ }
     }
   }
 
@@ -133,7 +144,7 @@ async function getTextFields(frame) {
         visible: el.offsetParent !== null || el.getBoundingClientRect().width > 0
       })).filter(f => f.selector && f.visible)
     })
-  } catch (e) { return [] }
+  } catch { return [] }
 }
 
 app.post('/submit', async (req, res) => {
@@ -154,7 +165,6 @@ app.post('/submit', async (req, res) => {
     await page.goto(form_url, { waitUntil: 'networkidle', timeout: 20000 })
     await page.waitForTimeout(2000)
 
-    // メインフレーム + iframe両方を処理
     const frames = [page, ...page.frames().filter(f => f !== page.mainFrame())]
     const filled = []
     const choiceHandled = []
@@ -163,7 +173,8 @@ app.post('/submit', async (req, res) => {
       // テキスト系フィールドを入力
       const fields = await getTextFields(frame)
       for (const field of fields) {
-        const fieldType = matchField(field.name, field.id, field.placeholder, field.tag === 'textarea' ? 'textarea' : field.type, field.tag)
+        const fieldType = matchField(field.name, field.id, field.placeholder,
+          field.tag === 'textarea' ? 'textarea' : field.type, field.tag)
         let value = null
         if (fieldType === 'company') value = company
         else if (fieldType === 'name') value = name
@@ -192,7 +203,7 @@ app.post('/submit', async (req, res) => {
       choiceHandled.push(...choices)
     }
 
-    // 送信ボタンを探す
+    // 送信ボタンを探してクリック
     let submitted = false
     const submitSelectors = [
       'button[type=submit]',
@@ -203,6 +214,7 @@ app.post('/submit', async (req, res) => {
       'button:has-text("次へ")',
       'button:has-text("Submit")',
       'button:has-text("Send")',
+      '[class*="submit"]',
     ]
 
     for (const sel of submitSelectors) {
