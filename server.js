@@ -237,7 +237,20 @@ app.post('/submit', async (req, res) => {
       } catch { continue }
     }
 
-    // 完了ページ判定
+    // SPA対応：送信後にDOMが変わるのを最大5秒待つ
+    if (clickedSubmit) {
+      const SPA_COMPLETE_SELECTORS = COMPLETE_KEYWORDS.map(kw => `:has-text("${kw}")`).slice(0, 5)
+      for (const sel of SPA_COMPLETE_SELECTORS) {
+        try {
+          await page.waitForSelector(sel, { timeout: 5000 })
+          break
+        } catch { continue }
+      }
+      // 追加で1秒待機（アニメーション完了待ち）
+      await page.waitForTimeout(1000)
+    }
+
+    // 完了ページ判定（URL変化 or DOMテキスト）
     const completeCheck = await isCompletePage(page)
     const success = clickedSubmit && completeCheck.detected
 
