@@ -176,9 +176,10 @@ app.post('/submit', async (req, res) => {
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
     })
     const page = await browser.newPage()
-    page.setDefaultTimeout(20000)
+    page.setDefaultTimeout(30000)
 
-    await page.goto(form_url, { waitUntil: 'networkidle', timeout: 20000 })
+    await page.goto(form_url, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => {})
     await page.waitForTimeout(2000)
 
     const frames = [page, ...page.frames().filter(f => f !== page.mainFrame())]
@@ -214,6 +215,26 @@ app.post('/submit', async (req, res) => {
       }
       const choices = await handleChoiceFields(frame)
       choiceHandled.push(...choices)
+    }
+
+    // フォームフィールドが1つも見つからない場合は早期リターン
+    if (filled.length === 0 && choiceHandled.length === 0) {
+      const shot = await page.screenshot({ fullPage: false })
+      await browser.close()
+      browser = null
+      return res.json({
+        success: false,
+        clicked_submit: false,
+        complete_detected: false,
+        filled_fields: [],
+        choice_fields: [],
+        screenshot_url: `data:image/png;base64,${shot.toString('base64')}`,
+        sent_content: { company: company||'', name: name||'', email: email||'', phone: phone||'', message: (message||'').slice(0,100) },
+        error: 'フォームフィールドが見つかりませんでした（フォームURLが正しくない可能性があります）',
+        page_title: await page.title(),
+        final_url: page.url(),
+        fields_found: 0
+      })
     }
 
     // 送信ボタンをクリック
